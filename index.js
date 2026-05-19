@@ -3,6 +3,12 @@ const cors = require("cors");
 const admin = require("firebase-admin");
 const { Paynow } = require("paynow");
 require("dotenv").config();
+console.log("=== ENV CHECK START ===");
+console.log("PAYNOW_ID:", process.env.PAYNOW_ID);
+console.log("PAYNOW_KEY EXISTS:", !!process.env.PAYNOW_KEY);
+console.log("BASE_URL:", process.env.BASE_URL);
+console.log("FIREBASE EXISTS:", !!process.env.FIREBASE_SERVICE_ACCOUNT);
+console.log("=== ENV CHECK END ===");
 
 const app = express();
 app.use(cors());
@@ -57,11 +63,15 @@ paynow.returnUrl = `${BASE_URL}/return`;
 
 app.post("/create-payment", async (req, res) => {
   try {
+    console.log("REQUEST RECEIVED:", req.body);
+
     const { uid, amount } = req.body;
 
-    if (!uid || !amount) {
-      return res.status(400).json({ error: "Missing uid or amount" });
-    }
+    console.log("UID:", uid);
+    console.log("AMOUNT:", amount);
+
+    // 🔥 THIS IS "BEFORE PAYNOW SEND"
+    console.log("CREATING PAYNOW PAYMENT...");
 
     const payment = paynow.createPayment(
       `Wallet Topup ${uid}`,
@@ -70,13 +80,15 @@ app.post("/create-payment", async (req, res) => {
 
     payment.add("Wallet Topup", Number(amount));
 
+    // 🔥 PAYNOW CALL HAPPENS HERE (THIS IS THE CRITICAL POINT)
     const response = await paynow.send(payment);
+
+    console.log("PAYNOW RESPONSE:", response);
 
     if (!response.success) {
       return res.status(400).json({ error: "Payment failed" });
     }
 
-    // FIX: ensure reference consistency
     const reference = response.reference || response.pollUrl;
 
     await db.collection("transactions").add({
@@ -94,8 +106,9 @@ app.post("/create-payment", async (req, res) => {
     });
 
   } catch (e) {
-    console.error("CREATE PAYMENT ERROR:", e);
-    res.status(500).send("Server error");
+    console.error("🔥 CREATE PAYMENT ERROR FULL:", e);
+    console.error("STACK:", e.stack);
+    return res.status(500).json({ error: e.message });
   }
 });
 
