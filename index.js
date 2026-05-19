@@ -81,6 +81,10 @@ app.post("/create-payment", async (req, res) => {
     payment.add("Wallet Topup", Number(amount));
 
     // 🔥 PAYNOW CALL HAPPENS HERE (THIS IS THE CRITICAL POINT)
+    console.log("PAYNOW_ID:", process.env.PAYNOW_ID);
+console.log("PAYNOW_KEY:", process.env.PAYNOW_KEY);
+console.log("TYPE OF AMOUNT:", typeof amount);
+console.log("AMOUNT VALUE:", amount);
     const response = await paynow.send(payment);
 
     console.log("PAYNOW RESPONSE:", response);
