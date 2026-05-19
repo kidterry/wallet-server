@@ -1,4 +1,6 @@
 const express = require("express");
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 const cors = require("cors");
 const admin = require("firebase-admin");
 const { Paynow } = require("paynow");
@@ -122,15 +124,17 @@ console.log("AMOUNT VALUE:", amount);
 
 app.post("/paynow-webhook", async (req, res) => {
   try {
-    console.log("🔥 WEBHOOK RECEIVED:", req.body);
-      console.log("🔥 WEBHOOK HIT");
-  console.log(req.body);
-  res.sendStatus(200);
+    console.log("🔥 WEBHOOK RECEIVED RAW BODY:", req.body);
 
-    const { reference, status } = req.body;
+    // Paynow sometimes sends data in different formats
+    const reference = req.body.reference || req.body["reference"];
+    const status = req.body.status || req.body["status"];
+
+    console.log("REFERENCE:", reference);
+    console.log("STATUS:", status);
 
     if (!reference || !status) {
-      console.log("❌ Missing reference or status");
+      console.log("❌ Missing data from Paynow");
       return res.sendStatus(400);
     }
 
@@ -140,14 +144,12 @@ app.post("/paynow-webhook", async (req, res) => {
       .get();
 
     if (txSnap.empty) {
-      console.log("❌ Transaction not found:", reference);
+      console.log("❌ Transaction not found");
       return res.sendStatus(404);
     }
 
     const txDoc = txSnap.docs[0];
     const tx = txDoc.data();
-
-    console.log("📌 Transaction found:", tx);
 
     if (status === "Paid") {
       await db.collection("users").doc(tx.uid).update({
@@ -156,10 +158,9 @@ app.post("/paynow-webhook", async (req, res) => {
 
       await txDoc.ref.update({
         status: "completed",
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      console.log("✅ Wallet updated for:", tx.uid);
+      console.log("✅ WALLET UPDATED");
     }
 
     if (status === "Cancelled" || status === "Failed") {
@@ -167,7 +168,7 @@ app.post("/paynow-webhook", async (req, res) => {
         status: "failed",
       });
 
-      console.log("⚠️ Payment failed/cancelled");
+      console.log("⚠️ PAYMENT FAILED");
     }
 
     return res.sendStatus(200);
