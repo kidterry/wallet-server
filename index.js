@@ -75,7 +75,7 @@ app.post("/create-payment", async (req, res) => {
 
    const payment = paynow.createPayment(
   `Wallet Topup ${uid}`,
-  "test@gmail.com"
+  "terrymurindi81@gmail.com"
 );
 
     payment.add("Wallet Topup", Number(amount));
