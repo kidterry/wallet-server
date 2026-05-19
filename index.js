@@ -73,10 +73,10 @@ app.post("/create-payment", async (req, res) => {
     // 🔥 THIS IS "BEFORE PAYNOW SEND"
     console.log("CREATING PAYNOW PAYMENT...");
 
-    const payment = paynow.createPayment(
-      `Wallet Topup ${uid}`,
-      "wallet@user.com"
-    );
+   const payment = paynow.createPayment(
+  `Wallet Topup ${uid}`,
+  "test@gmail.com"
+);
 
     payment.add("Wallet Topup", Number(amount));
 
