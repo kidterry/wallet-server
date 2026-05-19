@@ -90,7 +90,7 @@ console.log("AMOUNT VALUE:", amount);
       return res.status(400).json({ error: "Payment failed" });
     }
 
-    const reference = response.reference || response.pollUrl;
+    const reference = `wallet_${uid}_${Date.now()}`;
 
     await db.collection("transactions").add({
       uid,
