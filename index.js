@@ -1,20 +1,15 @@
 const express = require("express");
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
 const cors = require("cors");
 const admin = require("firebase-admin");
 const { Paynow } = require("paynow");
 require("dotenv").config();
-console.log("=== ENV CHECK START ===");
-console.log("PAYNOW_ID:", process.env.PAYNOW_ID);
-console.log("PAYNOW_KEY EXISTS:", !!process.env.PAYNOW_KEY);
-console.log("BASE_URL:", process.env.BASE_URL);
-console.log("FIREBASE EXISTS:", !!process.env.FIREBASE_SERVICE_ACCOUNT);
-console.log("=== ENV CHECK END ===");
 
-const app = express();
+const app = express(); // ✅ MUST BE FIRST
+
+// middleware MUST come AFTER app is created
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // ✅ FIX HERE
 
 // ============================
 // FIREBASE INIT (FIXED)
