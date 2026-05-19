@@ -123,6 +123,9 @@ console.log("AMOUNT VALUE:", amount);
 app.post("/paynow-webhook", async (req, res) => {
   try {
     console.log("🔥 WEBHOOK RECEIVED:", req.body);
+      console.log("🔥 WEBHOOK HIT");
+  console.log(req.body);
+  res.sendStatus(200);
 
     const { reference, status } = req.body;
 
