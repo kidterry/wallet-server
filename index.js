@@ -122,21 +122,29 @@ console.log("AMOUNT VALUE:", amount);
 
 app.post("/paynow-webhook", async (req, res) => {
   try {
-    console.log("WEBHOOK RECEIVED:", req.body);
+    console.log("🔥 WEBHOOK RECEIVED:", req.body);
 
     const { reference, status } = req.body;
 
-    if (!reference) return res.sendStatus(400);
+    if (!reference || !status) {
+      console.log("❌ Missing reference or status");
+      return res.sendStatus(400);
+    }
 
     const txSnap = await db
       .collection("transactions")
       .where("reference", "==", reference)
       .get();
 
-    if (txSnap.empty) return res.sendStatus(404);
+    if (txSnap.empty) {
+      console.log("❌ Transaction not found:", reference);
+      return res.sendStatus(404);
+    }
 
     const txDoc = txSnap.docs[0];
     const tx = txDoc.data();
+
+    console.log("📌 Transaction found:", tx);
 
     if (status === "Paid") {
       await db.collection("users").doc(tx.uid).update({
@@ -147,18 +155,22 @@ app.post("/paynow-webhook", async (req, res) => {
         status: "completed",
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
       });
+
+      console.log("✅ Wallet updated for:", tx.uid);
     }
 
     if (status === "Cancelled" || status === "Failed") {
       await txDoc.ref.update({
         status: "failed",
       });
+
+      console.log("⚠️ Payment failed/cancelled");
     }
 
     return res.sendStatus(200);
 
   } catch (e) {
-    console.error("WEBHOOK ERROR:", e);
+    console.error("🔥 WEBHOOK ERROR:", e);
     return res.sendStatus(500);
   }
 });
