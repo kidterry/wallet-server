@@ -122,7 +122,11 @@ app.post("/paynow-webhook", async (req, res) => {
     console.log("🔥 WEBHOOK RECEIVED RAW BODY:", req.body);
 
     // Paynow sometimes sends data in different formats
-    const reference = req.body.reference || req.body["reference"];
+   const rawReference = req.body.reference;
+const reference = decodeURIComponent(rawReference);
+
+console.log("RAW REFERENCE:", rawReference);
+console.log("DECODED REFERENCE:", reference);
     const status = req.body.status || req.body["status"];
 
     console.log("REFERENCE:", reference);
