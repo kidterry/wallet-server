@@ -13,7 +13,22 @@ app.use(express.json());
 // ============================
 
 // IMPORTANT: DO NOT use file in production
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+if (!raw) {
+  console.error("❌ FIREBASE_SERVICE_ACCOUNT is missing in Railway");
+  process.exit(1);
+}
+
+let serviceAccount;
+
+try {
+  serviceAccount = JSON.parse(raw);
+} catch (err) {
+  console.error("❌ FIREBASE_SERVICE_ACCOUNT is invalid JSON");
+  console.error(err.message);
+  process.exit(1);
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
