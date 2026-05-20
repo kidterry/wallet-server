@@ -9,7 +9,6 @@ const app = express();
 // ============================
 // MIDDLEWARE
 // ============================
-
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -17,7 +16,6 @@ app.use(express.urlencoded({ extended: true }));
 // ============================
 // FIREBASE INIT
 // ============================
-
 const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
 
 if (!raw) {
@@ -30,7 +28,8 @@ let serviceAccount;
 try {
   serviceAccount = JSON.parse(raw);
 } catch (err) {
-  console.error("❌ Invalid FIREBASE JSON");
+  console.error("❌ Invalid FIREBASE_SERVICE_ACCOUNT JSON");
+  console.error(err.message);
   process.exit(1);
 }
 
@@ -43,7 +42,6 @@ const db = admin.firestore();
 // ============================
 // PAYNOW INIT
 // ============================
-
 const paynow = new Paynow(
   process.env.PAYNOW_ID,
   process.env.PAYNOW_KEY
@@ -55,68 +53,87 @@ paynow.resultUrl = `${BASE_URL}/paynow-webhook`;
 paynow.returnUrl = `${BASE_URL}/return`;
 
 // ============================
-// CREATE PAYMENT (SECURE)
+// HEALTH CHECK
 // ============================
+app.get("/", (req, res) => {
+  res.send("Wallet server running ✅");
+});
 
+// ============================
+// RETURN PAGE
+// ============================
+app.get("/return", (req, res) => {
+  res.send("Payment completed. You may close this page.");
+});
+
+// ============================
+// CREATE PAYMENT (DEPOSIT)
+// ============================
 app.post("/create-payment", async (req, res) => {
   try {
     const { uid, amount } = req.body;
 
+    console.log("REQUEST:", req.body);
+
     if (!uid || !amount) {
-      return res.status(400).json({ error: "Missing uid/amount" });
+      return res.status(400).json({ error: "uid and amount required" });
+    }
+
+    if (Number(amount) <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
     }
 
     const reference = `wallet_${uid}_${Date.now()}`;
 
-    console.log("REFERENCE:", reference);
-
     const payment = paynow.createPayment(reference);
-
     payment.add("Wallet Topup", Number(amount));
+
+    console.log("CREATING PAYNOW PAYMENT...");
 
     const response = await paynow.send(payment);
 
-    if (!response.success) {
-      console.log("PAYNOW ERROR:", response);
-      return res.status(400).json({ error: "Payment failed" });
-    }
+    console.log("PAYNOW RESPONSE:", response);
 
-    const paynowReference = response.pollUrl;
+    if (!response.success) {
+      return res.status(400).json({
+        error: response.error || "Payment failed",
+      });
+    }
 
     await db.collection("transactions").add({
       uid,
       amount: Number(amount),
-      status: "pending",
       reference,
-      paynowReference,
       pollUrl: response.pollUrl,
+      status: "pending",
       processed: false,
+      type: "deposit",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     return res.json({
+      success: true,
       redirectUrl: response.redirectUrl,
       reference,
     });
 
   } catch (e) {
-    console.error("CREATE ERROR:", e);
+    console.error("🔥 CREATE PAYMENT ERROR:", e);
     return res.status(500).json({ error: e.message });
   }
 });
 
 // ============================
-// WEBHOOK (SECURE + IDENTITY SAFE)
+// PAYNOW WEBHOOK
 // ============================
-
 app.post("/paynow-webhook", async (req, res) => {
   try {
-    console.log("🔥 WEBHOOK:", req.body);
+    console.log("🔥 WEBHOOK BODY:", req.body);
 
-    const pollUrl = req.body.pollurl;
     const status = req.body.status;
+    const pollUrl = req.body.pollurl;
 
-    if (!pollUrl || !status) {
+    if (!status || !pollUrl) {
       return res.sendStatus(400);
     }
 
@@ -127,34 +144,35 @@ app.post("/paynow-webhook", async (req, res) => {
       .get();
 
     if (txSnap.empty) {
-      console.log("❌ Transaction not found");
       return res.sendStatus(404);
     }
 
     const txDoc = txSnap.docs[0];
-    const tx = txDoc.data();
 
-    // ============================
-    // IDENTITY LOCK (ANTI DOUBLE CREDIT)
-    // ============================
+    await db.runTransaction(async (t) => {
+      const freshTx = await t.get(txDoc.ref);
+      const tx = freshTx.data();
 
-    if (tx.processed === true) {
-      console.log("⚠️ Already processed");
-      return res.sendStatus(200);
-    }
+      if (tx.processed) return;
 
-    // ============================
-    // SUCCESS PAYMENT
-    // ============================
+      if (status === "Paid") {
+        const userRef = db.collection("users").doc(tx.uid);
 
-    if (status === "Paid") {
+        t.update(userRef, {
+          walletBalance: admin.firestore.FieldValue.increment(tx.amount),
+        });
 
-      await db.runTransaction(async (t) => {
-        const doc = await t.get(txDoc.ref);
+        const ledgerRef = db.collection("ledger").doc();
 
-        if (doc.data().processed) {
-          return;
-        }
+        t.set(ledgerRef, {
+          uid: tx.uid,
+          type: "credit",
+          source: "paynow",
+          amount: tx.amount,
+          reference: tx.reference,
+          status: "completed",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
 
         t.update(txDoc.ref, {
           status: "completed",
@@ -162,56 +180,133 @@ app.post("/paynow-webhook", async (req, res) => {
           paidAt: admin.firestore.FieldValue.serverTimestamp(),
         });
 
-        t.update(db.collection("users").doc(tx.uid), {
-          wallet: admin.firestore.FieldValue.increment(tx.amount),
+        console.log("✅ WALLET CREDITED");
+      }
+
+      if (status === "Cancelled" || status === "Failed") {
+        t.update(txDoc.ref, {
+          status: "failed",
+          processed: true,
         });
-      });
 
-      console.log("✅ WALLET UPDATED");
-    }
-
-    // ============================
-    // FAILED PAYMENT
-    // ============================
-
-    if (status === "Cancelled" || status === "Failed") {
-      await txDoc.ref.update({
-        status: "failed",
-        processed: true,
-      });
-
-      console.log("⚠️ PAYMENT FAILED");
-    }
+        console.log("⚠️ PAYMENT FAILED");
+      }
+    });
 
     return res.sendStatus(200);
 
   } catch (e) {
-    console.error("WEBHOOK ERROR:", e);
+    console.error("🔥 WEBHOOK ERROR:", e);
     return res.sendStatus(500);
   }
 });
 
 // ============================
-// RETURN
+// UNLOCK CONTACT ($0.50 FIXED)
 // ============================
+app.post("/unlock-contact", async (req, res) => {
+  try {
+    const { uid, listingId } = req.body;
 
-app.get("/return", (req, res) => {
-  res.send("Payment completed. You may close this page.");
+    if (!uid || !listingId) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const amount = 0.50; // 🔥 FIXED PRICE
+
+    const userRef = db.collection("users").doc(uid);
+
+    await db.runTransaction(async (t) => {
+      const userDoc = await t.get(userRef);
+
+      if (!userDoc.exists) {
+        throw new Error("User not found");
+      }
+
+      const balance = userDoc.data().walletBalance || 0;
+
+      if (balance < amount) {
+        throw new Error("Insufficient wallet balance");
+      }
+
+      const existingUnlock = await db
+        .collection("unlockedListings")
+        .where("uid", "==", uid)
+        .where("listingId", "==", listingId)
+        .limit(1)
+        .get();
+
+      if (!existingUnlock.empty) {
+        throw new Error("Already unlocked");
+      }
+
+      t.update(userRef, {
+        walletBalance: admin.firestore.FieldValue.increment(-amount),
+      });
+
+      const ledgerRef = db.collection("ledger").doc();
+
+      t.set(ledgerRef, {
+        uid,
+        type: "debit",
+        source: "unlock_contact",
+        amount,
+        listingId,
+        status: "completed",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      const unlockRef = db.collection("unlockedListings").doc();
+
+      t.set(unlockRef, {
+        uid,
+        listingId,
+        amount,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    });
+
+    return res.json({
+      success: true,
+      unlockPrice: amount,
+    });
+
+  } catch (e) {
+    console.error("🔥 UNLOCK ERROR:", e);
+    return res.status(400).json({ error: e.message });
+  }
 });
 
 // ============================
-// HEALTH
+// TRANSACTIONS (LEDGER)
 // ============================
+app.get("/transactions/:uid", async (req, res) => {
+  try {
+    const { uid } = req.params;
 
-app.get("/", (req, res) => {
-  res.send("Wallet server running ✅");
+    const snap = await db
+      .collection("ledger")
+      .where("uid", "==", uid)
+      .orderBy("createdAt", "desc")
+      .get();
+
+    const data = snap.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+
+    return res.json(data);
+
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 // ============================
-// START
+// START SERVER
 // ============================
-
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log("Server running on", PORT);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
