@@ -21,7 +21,7 @@ app.use(express.urlencoded({ extended: true }));
 const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
 
 if (!raw) {
-  console.error("❌ FIREBASE_SERVICE_ACCOUNT is missing in Railway");
+  console.error("❌ FIREBASE_SERVICE_ACCOUNT missing");
   process.exit(1);
 }
 
@@ -30,8 +30,7 @@ let serviceAccount;
 try {
   serviceAccount = JSON.parse(raw);
 } catch (err) {
-  console.error("❌ FIREBASE_SERVICE_ACCOUNT is invalid JSON");
-  console.error(err.message);
+  console.error("❌ Invalid FIREBASE JSON");
   process.exit(1);
 }
 
@@ -56,73 +55,44 @@ paynow.resultUrl = `${BASE_URL}/paynow-webhook`;
 paynow.returnUrl = `${BASE_URL}/return`;
 
 // ============================
-// CREATE PAYMENT
+// CREATE PAYMENT (SECURE)
 // ============================
 
 app.post("/create-payment", async (req, res) => {
   try {
-    console.log("REQUEST RECEIVED:", req.body);
-
     const { uid, amount } = req.body;
 
     if (!uid || !amount) {
-      return res.status(400).json({
-        error: "uid and amount required",
-      });
+      return res.status(400).json({ error: "Missing uid/amount" });
     }
 
-    console.log("UID:", uid);
-    console.log("AMOUNT:", amount);
-
-    // YOUR INTERNAL REFERENCE
     const reference = `wallet_${uid}_${Date.now()}`;
 
-    console.log("REFERENCE CREATED:", reference);
+    console.log("REFERENCE:", reference);
 
-    // IMPORTANT:
-    // USE YOUR INTERNAL REFERENCE HERE
-    const payment = paynow.createPayment(
-      reference,
-      "terrymurindi81@gmail.com"
-    );
+    const payment = paynow.createPayment(reference);
 
     payment.add("Wallet Topup", Number(amount));
 
-    console.log("CREATING PAYNOW PAYMENT...");
-
     const response = await paynow.send(payment);
 
-    console.log("PAYNOW RESPONSE:", response);
-
     if (!response.success) {
-      return res.status(400).json({
-        error: "Payment failed",
-      });
+      console.log("PAYNOW ERROR:", response);
+      return res.status(400).json({ error: "Payment failed" });
     }
 
-    // THIS IS THE IMPORTANT PAYNOW ID
     const paynowReference = response.pollUrl;
 
-    console.log("PAYNOW REFERENCE:", paynowReference);
-
-    // SAVE TRANSACTION
     await db.collection("transactions").add({
       uid,
       amount: Number(amount),
       status: "pending",
-
-      // YOUR INTERNAL ID
       reference,
-
-      // PAYNOW IDENTIFIER
       paynowReference,
-
       pollUrl: response.pollUrl,
-
+      processed: false,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-
-    console.log("✅ TRANSACTION SAVED");
 
     return res.json({
       redirectUrl: response.redirectUrl,
@@ -130,36 +100,30 @@ app.post("/create-payment", async (req, res) => {
     });
 
   } catch (e) {
-    console.error("🔥 CREATE PAYMENT ERROR:", e);
-    return res.status(500).json({
-      error: e.message,
-    });
+    console.error("CREATE ERROR:", e);
+    return res.status(500).json({ error: e.message });
   }
 });
 
 // ============================
-// WEBHOOK
+// WEBHOOK (SECURE + IDENTITY SAFE)
 // ============================
 
 app.post("/paynow-webhook", async (req, res) => {
   try {
-    console.log("🔥 WEBHOOK RECEIVED RAW BODY:", req.body);
+    console.log("🔥 WEBHOOK:", req.body);
 
-    const status = req.body.status;
     const pollUrl = req.body.pollurl;
-
-    console.log("STATUS:", status);
-    console.log("POLL URL:", pollUrl);
+    const status = req.body.status;
 
     if (!pollUrl || !status) {
-      console.log("❌ Missing pollUrl or status");
       return res.sendStatus(400);
     }
 
-    // MATCH USING pollUrl
     const txSnap = await db
       .collection("transactions")
       .where("pollUrl", "==", pollUrl)
+      .limit(1)
       .get();
 
     if (txSnap.empty) {
@@ -170,42 +134,50 @@ app.post("/paynow-webhook", async (req, res) => {
     const txDoc = txSnap.docs[0];
     const tx = txDoc.data();
 
-    console.log("✅ TRANSACTION FOUND");
+    // ============================
+    // IDENTITY LOCK (ANTI DOUBLE CREDIT)
+    // ============================
+
+    if (tx.processed === true) {
+      console.log("⚠️ Already processed");
+      return res.sendStatus(200);
+    }
 
     // ============================
-    // PAYMENT SUCCESS
+    // SUCCESS PAYMENT
     // ============================
 
     if (status === "Paid") {
 
-      // PREVENT DOUBLE CREDIT
-      if (tx.status === "completed") {
-        console.log("⚠️ Payment already processed");
-        return res.sendStatus(200);
-      }
+      await db.runTransaction(async (t) => {
+        const doc = await t.get(txDoc.ref);
 
-      await db.collection("users").doc(tx.uid).update({
-        wallet: admin.firestore.FieldValue.increment(tx.amount),
-      });
+        if (doc.data().processed) {
+          return;
+        }
 
-      await txDoc.ref.update({
-        status: "completed",
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        t.update(txDoc.ref, {
+          status: "completed",
+          processed: true,
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        t.update(db.collection("users").doc(tx.uid), {
+          wallet: admin.firestore.FieldValue.increment(tx.amount),
+        });
       });
 
       console.log("✅ WALLET UPDATED");
     }
 
     // ============================
-    // PAYMENT FAILED
+    // FAILED PAYMENT
     // ============================
 
-    if (
-      status === "Cancelled" ||
-      status === "Failed"
-    ) {
+    if (status === "Cancelled" || status === "Failed") {
       await txDoc.ref.update({
         status: "failed",
+        processed: true,
       });
 
       console.log("⚠️ PAYMENT FAILED");
@@ -214,13 +186,13 @@ app.post("/paynow-webhook", async (req, res) => {
     return res.sendStatus(200);
 
   } catch (e) {
-    console.error("🔥 WEBHOOK ERROR:", e);
+    console.error("WEBHOOK ERROR:", e);
     return res.sendStatus(500);
   }
 });
 
 // ============================
-// RETURN PAGE
+// RETURN
 // ============================
 
 app.get("/return", (req, res) => {
@@ -228,7 +200,7 @@ app.get("/return", (req, res) => {
 });
 
 // ============================
-// HEALTH CHECK
+// HEALTH
 // ============================
 
 app.get("/", (req, res) => {
@@ -236,11 +208,10 @@ app.get("/", (req, res) => {
 });
 
 // ============================
-// START SERVER
+// START
 // ============================
 
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("Server running on", PORT);
 });
