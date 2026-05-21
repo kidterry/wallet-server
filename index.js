@@ -73,8 +73,6 @@ app.post("/create-payment", async (req, res) => {
   try {
     const { uid, amount } = req.body;
 
-    console.log("REQUEST:", req.body);
-
     if (!uid || !amount) {
       return res.status(400).json({ error: "uid and amount required" });
     }
@@ -85,14 +83,15 @@ app.post("/create-payment", async (req, res) => {
 
     const reference = `wallet_${uid}_${Date.now()}`;
 
-    const payment = paynow.createPayment(reference);
+    // ✅ FIX: Use business email instead of personal email
+    const payment = paynow.createPayment(
+      reference,
+      "payments@prorentit.com"
+    );
+
     payment.add("Wallet Topup", Number(amount));
 
-    console.log("CREATING PAYNOW PAYMENT...");
-
     const response = await paynow.send(payment);
-
-    console.log("PAYNOW RESPONSE:", response);
 
     if (!response.success) {
       return res.status(400).json({
@@ -128,8 +127,6 @@ app.post("/create-payment", async (req, res) => {
 // ============================
 app.post("/paynow-webhook", async (req, res) => {
   try {
-    console.log("🔥 WEBHOOK BODY:", req.body);
-
     const status = req.body.status;
     const pollUrl = req.body.pollurl;
 
@@ -162,25 +159,11 @@ app.post("/paynow-webhook", async (req, res) => {
           walletBalance: admin.firestore.FieldValue.increment(tx.amount),
         });
 
-        const ledgerRef = db.collection("ledger").doc();
-
-        t.set(ledgerRef, {
-          uid: tx.uid,
-          type: "credit",
-          source: "paynow",
-          amount: tx.amount,
-          reference: tx.reference,
-          status: "completed",
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-
         t.update(txDoc.ref, {
           status: "completed",
           processed: true,
           paidAt: admin.firestore.FieldValue.serverTimestamp(),
         });
-
-        console.log("✅ WALLET CREDITED");
       }
 
       if (status === "Cancelled" || status === "Failed") {
@@ -188,8 +171,6 @@ app.post("/paynow-webhook", async (req, res) => {
           status: "failed",
           processed: true,
         });
-
-        console.log("⚠️ PAYMENT FAILED");
       }
     });
 
@@ -202,7 +183,7 @@ app.post("/paynow-webhook", async (req, res) => {
 });
 
 // ============================
-// UNLOCK CONTACT ($0.50 FIXED)
+// UNLOCK CONTACT
 // ============================
 app.post("/unlock-contact", async (req, res) => {
   try {
@@ -212,16 +193,14 @@ app.post("/unlock-contact", async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    const amount = 0.50; // 🔥 FIXED PRICE
+    const amount = 0.50;
 
     const userRef = db.collection("users").doc(uid);
 
     await db.runTransaction(async (t) => {
       const userDoc = await t.get(userRef);
 
-      if (!userDoc.exists) {
-        throw new Error("User not found");
-      }
+      if (!userDoc.exists) throw new Error("User not found");
 
       const balance = userDoc.data().walletBalance || 0;
 
@@ -229,31 +208,8 @@ app.post("/unlock-contact", async (req, res) => {
         throw new Error("Insufficient wallet balance");
       }
 
-      const existingUnlock = await db
-        .collection("unlockedListings")
-        .where("uid", "==", uid)
-        .where("listingId", "==", listingId)
-        .limit(1)
-        .get();
-
-      if (!existingUnlock.empty) {
-        throw new Error("Already unlocked");
-      }
-
       t.update(userRef, {
         walletBalance: admin.firestore.FieldValue.increment(-amount),
-      });
-
-      const ledgerRef = db.collection("ledger").doc();
-
-      t.set(ledgerRef, {
-        uid,
-        type: "debit",
-        source: "unlock_contact",
-        amount,
-        listingId,
-        status: "completed",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
       const unlockRef = db.collection("unlockedListings").doc();
@@ -274,31 +230,6 @@ app.post("/unlock-contact", async (req, res) => {
   } catch (e) {
     console.error("🔥 UNLOCK ERROR:", e);
     return res.status(400).json({ error: e.message });
-  }
-});
-
-// ============================
-// TRANSACTIONS (LEDGER)
-// ============================
-app.get("/transactions/:uid", async (req, res) => {
-  try {
-    const { uid } = req.params;
-
-    const snap = await db
-      .collection("ledger")
-      .where("uid", "==", uid)
-      .orderBy("createdAt", "desc")
-      .get();
-
-    const data = snap.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    return res.json(data);
-
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
   }
 });
 
